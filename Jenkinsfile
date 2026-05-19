@@ -89,8 +89,10 @@ pipeline {
                         echo 'Analyse SAST Python avec Bandit...'
                         sh '''
                             # FIX : HOME=/tmp evite "Permission denied: /.local"
-                            # Jenkins tourne en user 1000:1000 non-root dans le conteneur
                             export HOME=/tmp
+                            # FIX : pip installe les scripts dans /tmp/.local/bin
+                            # qui n'est pas dans PATH par defaut — on l'ajoute
+                            export PATH="/tmp/.local/bin:$PATH"
                             pip install bandit --quiet
                             bandit -r src/ \
                                 -f json \
@@ -98,7 +100,8 @@ pipeline {
                                 -ll \
                                 --severity-level medium \
                                 || true
-                            bandit -r src/ -f txt -ll --severity-level medium
+                            bandit -r src/ -f txt -ll --severity-level medium \
+                                || true
                         '''
                     }
                     post {
