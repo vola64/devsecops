@@ -56,6 +56,7 @@ pipeline {
                         docker {
                             image 'python:3.11-slim'
                             reuseNode true
+                            args '-u root'  // FIX: permission denied /.local
                         }
                     }
                     steps {
@@ -137,6 +138,7 @@ pipeline {
                 docker {
                     image 'python:3.11-slim'
                     reuseNode true
+                    args '-u root'  // FIX: permission denied /.local
                 }
             }
             steps {
