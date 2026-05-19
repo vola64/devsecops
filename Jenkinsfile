@@ -612,7 +612,7 @@ pipeline {
                     Branche   : ${env.GIT_BRANCH}
                     Details   : ${env.BUILD_URL}
                 """,
-                recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+                to: "${env.NOTIFY_EMAIL ?: 'volasoahanitra@example.com'}"
             )
         }
 
