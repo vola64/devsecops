@@ -3,33 +3,39 @@
 // Projet : Supply Chain Security — Jenkins + Docker Hub
 // =============================================================================
 //
+// PLUGINS JENKINS REQUIS :
+//   - Docker Pipeline         → agent { docker { ... } }
+//   - AnsiColor               → ansiColor('xterm')
+//   - HTML Publisher          → publishHTML(...)
+//   - Slack Notification      → slackSend(...)
+//   - Email Extension         → emailext(...)
+//
 // CREDENTIALS JENKINS REQUIS (Manage Jenkins → Credentials) :
 //   docker-hub-credentials  → Username/Password (Docker Hub)
 //   cosign-private-key      → Secret File (cosign.key)
 //   cosign-public-key       → Secret File (cosign.pub)
 //   cosign-password         → Secret Text (passphrase Cosign)
-//   deploy-ssh-key          → SSH Username with Private Key (optionnel)
 // =============================================================================
 
 pipeline {
 
-    // ─── Agent ────────────────────────────────────────────────────────────────
-    agent {
-        docker {
-            image 'docker:26.1-dind'
-            args  '--privileged -v /var/run/docker.sock:/var/run/docker.sock'
-        }
-    }
+    // ─── Agent global ─────────────────────────────────────────────────────────
+    // FIX : "any" au lieu de docker:dind global.
+    // Chaque stage déclare son propre agent docker (reuseNode true).
+    // Le nœud Jenkins doit avoir Docker installé et l'utilisateur jenkins
+    // dans le groupe docker  →  sudo usermod -aG docker jenkins
+    agent any
 
     // ─── Variables globales ───────────────────────────────────────────────────
+    // FIX : IMAGE_FULL et IMAGE_LATEST supprimés ici car DOCKER_HUB_USER
+    //       n'est disponible que dans les blocs withCredentials.
+    //       Ces variables sont recalculées en shell dans chaque stage.
     environment {
-        DOCKER_REGISTRY  = 'docker.io'
-        IMAGE_NAME       = "devsecops-api"
-        IMAGE_TAG        = "${env.GIT_COMMIT?.take(8) ?: 'latest'}"
-        IMAGE_FULL       = "${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
-        IMAGE_LATEST     = "${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:latest"
-        TRIVY_SEVERITY   = 'CRITICAL,HIGH'
-        REPORTS_DIR      = 'reports'
+        DOCKER_REGISTRY = 'docker.io'
+        IMAGE_NAME      = "devsecops-api"
+        IMAGE_TAG       = "${env.GIT_COMMIT?.take(8) ?: 'latest'}"
+        TRIVY_SEVERITY  = 'CRITICAL,HIGH'
+        REPORTS_DIR     = 'reports'
     }
 
     // ─── Options globales ─────────────────────────────────────────────────────
@@ -38,12 +44,12 @@ pipeline {
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
-        ansiColor('xterm')
+        ansiColor('xterm')   // FIX : nécessite le plugin AnsiColor
     }
 
     // ─── Déclencheurs ─────────────────────────────────────────────────────────
     triggers {
-        pollSCM('H/5 * * * *')   // Vérifier GitLab toutes les 5 min
+        pollSCM('H/5 * * * *')
     }
 
     // =========================================================================
@@ -52,13 +58,13 @@ pipeline {
     stages {
 
         // ─── Stage 0 : Initialisation ─────────────────────────────────────────
-        stage('🔧 Init') {
+        stage('Init') {
             steps {
                 echo '═══════════════════════════════════════════════'
                 echo " Pipeline DevSecOps — Build #${env.BUILD_NUMBER}"
                 echo " Commit  : ${env.GIT_COMMIT?.take(12)}"
                 echo " Branche : ${env.GIT_BRANCH}"
-                echo " Image   : ${env.IMAGE_FULL}"
+                echo " Image   : ${env.IMAGE_NAME}:${env.IMAGE_TAG}"
                 echo '═══════════════════════════════════════════════'
                 sh 'mkdir -p ${REPORTS_DIR}'
                 sh 'docker info'
@@ -68,7 +74,7 @@ pipeline {
         // =========================================================================
         // STAGE 1 — SAST : Analyse statique + Secrets
         // =========================================================================
-        stage('🔍 SAST & Secrets') {
+        stage('SAST et Secrets') {
             parallel {
 
                 // ─── Bandit : SAST Python ─────────────────────────────────────
@@ -80,7 +86,7 @@ pipeline {
                         }
                     }
                     steps {
-                        echo '🔍 Analyse SAST Python avec Bandit...'
+                        echo 'Analyse SAST Python avec Bandit...'
                         sh '''
                             pip install bandit --quiet
                             bandit -r src/ \
@@ -110,7 +116,7 @@ pipeline {
                         }
                     }
                     steps {
-                        echo '🔐 Détection de secrets avec Gitleaks...'
+                        echo 'Detection de secrets avec Gitleaks...'
                         sh '''
                             gitleaks detect \
                                 --source . \
@@ -122,7 +128,7 @@ pipeline {
                     }
                     post {
                         failure {
-                            error '❌ GITLEAKS : Secrets détectés dans le code ! Pipeline arrêté.'
+                            error 'GITLEAKS : Secrets detectes dans le code ! Pipeline arrete.'
                         }
                         always {
                             archiveArtifacts artifacts: "${REPORTS_DIR}/gitleaks-report.json",
@@ -140,7 +146,7 @@ pipeline {
                         }
                     }
                     steps {
-                        echo '🔍 Analyse SAST OWASP avec Semgrep...'
+                        echo 'Analyse SAST OWASP avec Semgrep...'
                         sh '''
                             semgrep scan \
                                 --config=p/python \
@@ -164,17 +170,17 @@ pipeline {
                 }
             }
             post {
-                success { echo '✅ SAST — Aucun problème critique détecté' }
-                failure { echo '❌ SAST — Des problèmes de sécurité ont été détectés' }
+                success { echo 'SAST — Aucun probleme critique detecte' }
+                failure { echo 'SAST — Des problemes de securite ont ete detectes' }
             }
         }
 
         // =========================================================================
         // STAGE 2 — BUILD : Construction de l'image Docker
         // =========================================================================
-        stage('🐳 Build') {
+        stage('Build Docker') {
             steps {
-                echo '🐳 Construction de l\'image Docker sécurisée...'
+                echo "Construction de l'image Docker securisee..."
                 withCredentials([usernamePassword(
                     credentialsId: 'docker-hub-credentials',
                     usernameVariable: 'DOCKER_HUB_USER',
@@ -185,7 +191,7 @@ pipeline {
                         echo "$DOCKER_HUB_PASS" | docker login ${DOCKER_REGISTRY} \
                             -u "$DOCKER_HUB_USER" --password-stdin
 
-                        # Variables dynamiques
+                        # Calcul des noms d'images
                         IMAGE_FULL="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
                         IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:latest"
                         CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -203,25 +209,25 @@ pipeline {
                             --build-arg BUILDKIT_INLINE_CACHE=1 \
                             .
 
-                        echo "✅ Image construite: $IMAGE_FULL"
+                        echo "Image construite : $IMAGE_FULL"
                         docker images "${DOCKER_HUB_USER}/${IMAGE_NAME}"
 
-                        # Sauvegarder pour les stages suivants
+                        # Sauvegarder l'image pour les stages suivants
                         docker save "$IMAGE_FULL" | gzip > image.tar.gz
                     '''
                 }
             }
             post {
                 always  { sh 'docker logout ${DOCKER_REGISTRY} || true' }
-                success { echo '✅ Build Docker réussi' }
-                failure { error '❌ Build Docker échoué' }
+                success { echo 'Build Docker reussi' }
+                failure { error 'Build Docker echoue' }
             }
         }
 
         // =========================================================================
         // STAGE 3 — TEST : Tests unitaires et couverture
         // =========================================================================
-        stage('🧪 Tests') {
+        stage('Tests') {
             agent {
                 docker {
                     image 'python:3.11-slim'
@@ -229,7 +235,7 @@ pipeline {
                 }
             }
             steps {
-                echo '🧪 Exécution des tests unitaires...'
+                echo 'Execution des tests unitaires...'
                 sh '''
                     pip install -r requirements.txt --quiet
                     python -m pytest tests/ \
@@ -244,32 +250,31 @@ pipeline {
             }
             post {
                 always {
-                    // Publier les résultats JUnit
                     junit testResults: "${REPORTS_DIR}/pytest-report.xml",
                           allowEmptyResults: true
 
-                    // Publier le rapport de couverture HTML
+                    // FIX : nécessite le plugin HTML Publisher
                     publishHTML(target: [
                         allowMissing         : false,
                         alwaysLinkToLastBuild: true,
                         keepAll              : true,
                         reportDir            : "${REPORTS_DIR}/coverage-html",
                         reportFiles          : 'index.html',
-                        reportName           : '📊 Coverage Report'
+                        reportName           : 'Coverage Report'
                     ])
 
                     archiveArtifacts artifacts: "${REPORTS_DIR}/coverage.xml",
                                      allowEmptyArchive: true
                 }
-                success { echo '✅ Tests réussis — Couverture ≥ 70%' }
-                failure { error '❌ Tests échoués ou couverture insuffisante' }
+                success { echo 'Tests reussis — Couverture superieure a 70%' }
+                failure { error 'Tests echoues ou couverture insuffisante' }
             }
         }
 
         // =========================================================================
         // STAGE 4 — SCAN : Vulnérabilités image + dépendances
         // =========================================================================
-        stage('🔎 Scan Sécurité') {
+        stage('Scan Securite') {
             parallel {
 
                 // ─── Trivy : Scan image Docker ─────────────────────────────────
@@ -278,14 +283,18 @@ pipeline {
                         docker {
                             image 'aquasec/trivy:0.51.4'
                             reuseNode true
+                            // FIX : accès au socket Docker pour charger l'image
                             args '--entrypoint= -v /var/run/docker.sock:/var/run/docker.sock'
                         }
                     }
                     steps {
-                        echo '🔍 Scan Trivy de l\'image Docker...'
+                        echo "Scan Trivy de l'image Docker..."
                         sh '''
-                            # Charger l'image sauvegardée
+                            # Charger l'image sauvegardée au stage Build
                             docker load < image.tar.gz
+
+                            # FIX : nom d'image explicite plutôt que "head -1"
+                            TARGET_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
                             # Scan vulnérabilités
                             trivy image \
@@ -294,7 +303,7 @@ pipeline {
                                 --output ${REPORTS_DIR}/trivy-vuln-report.json \
                                 --exit-code 1 \
                                 --no-progress \
-                                $(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
+                                "$TARGET_IMAGE"
 
                             # Scan secrets dans l'image
                             trivy image \
@@ -303,7 +312,7 @@ pipeline {
                                 --output ${REPORTS_DIR}/trivy-secret-report.json \
                                 --exit-code 1 \
                                 --no-progress \
-                                $(docker images --format "{{.Repository}}:{{.Tag}}" | head -1)
+                                "$TARGET_IMAGE"
                         '''
                     }
                     post {
@@ -311,8 +320,8 @@ pipeline {
                             archiveArtifacts artifacts: "${REPORTS_DIR}/trivy-*.json",
                                              allowEmptyArchive: true
                         }
-                        success { echo '✅ Trivy — Aucune vulnérabilité CRITICAL/HIGH' }
-                        failure { error '❌ Trivy — Vulnérabilités critiques détectées !' }
+                        success { echo 'Trivy — Aucune vulnerabilite CRITICAL/HIGH' }
+                        failure { error 'Trivy — Vulnerabilites critiques detectees !' }
                     }
                 }
 
@@ -325,7 +334,7 @@ pipeline {
                         }
                     }
                     steps {
-                        echo '🔍 OWASP Dependency Check...'
+                        echo 'OWASP Dependency Check...'
                         sh '''
                             /usr/share/dependency-check/bin/dependency-check.sh \
                                 --project "DevSecOps API" \
@@ -341,13 +350,14 @@ pipeline {
                         always {
                             archiveArtifacts artifacts: "${REPORTS_DIR}/dependency-check-report.*",
                                              allowEmptyArchive: true
+                            // FIX : nécessite le plugin HTML Publisher
                             publishHTML(target: [
                                 allowMissing         : true,
                                 alwaysLinkToLastBuild: true,
                                 keepAll              : true,
                                 reportDir            : REPORTS_DIR,
                                 reportFiles          : 'dependency-check-report.html',
-                                reportName           : '🛡️ OWASP Report'
+                                reportName           : 'OWASP Report'
                             ])
                         }
                     }
@@ -358,9 +368,9 @@ pipeline {
         // =========================================================================
         // STAGE 5 — SIGN : Signature cryptographique avec Cosign
         // =========================================================================
-        stage('✍️ Signature Cosign') {
+        stage('Signature Cosign') {
             steps {
-                echo '✍️ Signature de l\'image avec Cosign...'
+                echo "Signature de l'image avec Cosign..."
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'docker-hub-credentials',
@@ -380,7 +390,7 @@ pipeline {
 
                         IMAGE_FULL="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-                        # Login et push de l'image d'abord
+                        # Login et push de l'image
                         echo "$DOCKER_HUB_PASS" | docker login ${DOCKER_REGISTRY} \
                             -u "$DOCKER_HUB_USER" --password-stdin
                         docker push "$IMAGE_FULL"
@@ -397,24 +407,24 @@ pipeline {
                             "$IMAGE_FULL"
 
                         # Vérification immédiate
-                        echo "🔍 Vérification de la signature..."
+                        echo "Verification de la signature..."
                         cosign verify --key "$COSIGN_PUB_FILE" "$IMAGE_FULL"
 
-                        echo "✅ Signature Cosign valide pour $IMAGE_FULL"
+                        echo "Signature Cosign valide pour $IMAGE_FULL"
                     '''
                 }
             }
             post {
                 always  { sh 'docker logout ${DOCKER_REGISTRY} || true' }
-                success { echo '✅ Image signée et vérifiée avec succès' }
-                failure { error '❌ Échec de la signature Cosign — Pipeline arrêté' }
+                success { echo 'Image signee et verifiee avec succes' }
+                failure { error 'Echec de la signature Cosign — Pipeline arrete' }
             }
         }
 
         // =========================================================================
         // STAGE 6 — PUSH : Push Docker Hub (image signée)
         // =========================================================================
-        stage('📦 Push Docker Hub') {
+        stage('Push Docker Hub') {
             when {
                 anyOf {
                     branch 'main'
@@ -423,7 +433,7 @@ pipeline {
                 }
             }
             steps {
-                echo '📦 Push de l\'image vers Docker Hub...'
+                echo "Push de l'image vers Docker Hub..."
                 withCredentials([usernamePassword(
                     credentialsId: 'docker-hub-credentials',
                     usernameVariable: 'DOCKER_HUB_USER',
@@ -442,7 +452,7 @@ pipeline {
                         docker push "$IMAGE_BRANCH"
                         docker push "$IMAGE_LATEST"
 
-                        echo "✅ Images disponibles sur Docker Hub:"
+                        echo "Images disponibles sur Docker Hub :"
                         echo "   $IMAGE_FULL"
                         echo "   $IMAGE_LATEST"
                         echo "   $IMAGE_BRANCH"
@@ -451,28 +461,27 @@ pipeline {
             }
             post {
                 always  { sh 'docker logout ${DOCKER_REGISTRY} || true' }
-                success { echo '✅ Push Docker Hub réussi' }
+                success { echo 'Push Docker Hub reussi' }
             }
         }
 
         // =========================================================================
         // STAGE 7 — DEPLOY : Déploiement Docker Compose sécurisé
         // =========================================================================
-        stage('🚀 Déploiement') {
+        stage('Deploiement') {
             when {
                 branch 'main'
             }
-            // Déploiement manuel (approbation requise)
             input {
-                message '🚀 Déployer en production ?'
-                ok      'Oui, déployer !'
+                message 'Deployer en production ?'
+                ok      'Oui, deployer !'
                 parameters {
                     string(name: 'DEPLOY_ENV', defaultValue: 'production',
                            description: 'Environnement cible')
                 }
             }
             steps {
-                echo "🚀 Déploiement vers ${DEPLOY_ENV}..."
+                echo "Deploiement vers ${DEPLOY_ENV}..."
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'docker-hub-credentials',
@@ -484,16 +493,16 @@ pipeline {
                     sh '''
                         IMAGE_FULL="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-                        # ─── Vérifier la signature AVANT déploiement ─────────
-                        echo "🔍 Vérification signature avant déploiement..."
+                        # Vérifier la signature AVANT déploiement
+                        echo "Verification signature avant deploiement..."
                         if command -v cosign &>/dev/null; then
                             cosign verify --key "$COSIGN_PUB_FILE" "$IMAGE_FULL"
-                            echo "✅ Signature valide — déploiement autorisé"
+                            echo "Signature valide — deploiement autorise"
                         else
-                            echo "⚠️  Cosign non disponible, vérification ignorée"
+                            echo "Cosign non disponible, verification ignoree"
                         fi
 
-                        # ─── Déploiement Docker Compose ───────────────────────
+                        # Déploiement Docker Compose
                         export DOCKER_IMAGE="$IMAGE_FULL"
                         export APP_VERSION="${IMAGE_TAG}"
 
@@ -502,10 +511,10 @@ pipeline {
 
                         sleep 10
 
-                        # ─── Health check post-déploiement ────────────────────
-                        echo "🏥 Health check..."
+                        # Health check post-déploiement
+                        echo "Health check..."
                         curl -sf http://localhost:8000/health || exit 1
-                        echo "✅ Application healthy après déploiement"
+                        echo "Application healthy apres deploiement"
 
                         docker compose ps
                     '''
@@ -513,17 +522,18 @@ pipeline {
             }
             post {
                 success {
-                    echo '✅ Déploiement réussi en production'
+                    echo 'Deploiement reussi en production'
+                    // FIX : nécessite le plugin Slack Notification
                     slackSend(
                         color: 'good',
-                        message: "✅ *DevSecOps API* déployée — Build #${env.BUILD_NUMBER} | ${env.IMAGE_FULL}"
+                        message: "DevSecOps API deployee — Build #${env.BUILD_NUMBER} | ${env.IMAGE_NAME}:${env.IMAGE_TAG}"
                     )
                 }
                 failure {
-                    echo '❌ Déploiement échoué — Rollback recommandé'
+                    echo 'Deploiement echoue — Rollback recommande'
                     slackSend(
                         color: 'danger',
-                        message: "❌ *DevSecOps API* — Échec déploiement Build #${env.BUILD_NUMBER}"
+                        message: "DevSecOps API — Echec deploiement Build #${env.BUILD_NUMBER}"
                     )
                 }
             }
@@ -537,14 +547,14 @@ pipeline {
     post {
 
         always {
-            echo '📊 Génération du rapport de sécurité consolidé...'
+            echo 'Generation du rapport de securite consolide...'
             sh '''
                 python3 << 'PYEOF'
 import json, os
 from datetime import datetime
 
 print("=" * 60)
-print("  RAPPORT DE SÉCURITÉ — Pipeline Jenkins DevSecOps")
+print("  RAPPORT DE SECURITE — Pipeline Jenkins DevSecOps")
 print(f"  Build     : #{os.getenv('BUILD_NUMBER', 'N/A')}")
 print(f"  Commit    : {os.getenv('GIT_COMMIT', 'N/A')[:12]}")
 print(f"  Date      : {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}")
@@ -558,9 +568,9 @@ try:
         b = json.load(f)
     issues = b.get("results", [])
     highs  = [i for i in issues if i.get("issue_severity") in ("HIGH", "MEDIUM")]
-    print(f"\\n🔍 BANDIT    | Total: {len(issues)} | MEDIUM+: {len(highs)}")
-except:
-    print("\\n🔍 BANDIT    | rapport non disponible")
+    print(f"\\nBANDIT    | Total: {len(issues)} | MEDIUM+: {len(highs)}")
+except Exception:
+    print("\\nBANDIT    | rapport non disponible")
 
 # Trivy
 try:
@@ -571,46 +581,44 @@ try:
         vulns.extend(result.get("Vulnerabilities", []) or [])
     crits = [v for v in vulns if v.get("Severity") == "CRITICAL"]
     highs = [v for v in vulns if v.get("Severity") == "HIGH"]
-    print(f"🐳 TRIVY     | CRITICAL: {len(crits)} | HIGH: {len(highs)}")
-except:
-    print("🐳 TRIVY     | rapport non disponible")
+    print(f"TRIVY     | CRITICAL: {len(crits)} | HIGH: {len(highs)}")
+except Exception:
+    print("TRIVY     | rapport non disponible")
 
 print("\\n" + "=" * 60)
 PYEOF
-            ''' 
-            // Archiver tous les rapports
+            '''
+
             archiveArtifacts artifacts: 'reports/**/*',
                              allowEmptyArchive: true
 
-            // Nettoyer les images Docker locales
             sh 'docker rmi $(docker images -q) --force 2>/dev/null || true'
             sh 'rm -f image.tar.gz'
-
-            // Nettoyer le workspace (optionnel)
             cleanWs()
         }
 
         success {
-            echo "✅ Pipeline DevSecOps réussi — Build #${env.BUILD_NUMBER}"
+            echo "Pipeline DevSecOps reussi — Build #${env.BUILD_NUMBER}"
         }
 
         failure {
-            echo "❌ Pipeline DevSecOps échoué — Build #${env.BUILD_NUMBER}"
+            echo "Pipeline DevSecOps echoue — Build #${env.BUILD_NUMBER}"
+            // FIX : nécessite le plugin Email Extension
             emailext(
-                subject: "❌ Pipeline DevSecOps FAILED — Build #${env.BUILD_NUMBER}",
+                subject: "Pipeline DevSecOps FAILED — Build #${env.BUILD_NUMBER}",
                 body: """
-                    Le pipeline CI/CD a échoué.
+                    Le pipeline CI/CD a echoue.
                     Build     : #${env.BUILD_NUMBER}
                     Commit    : ${env.GIT_COMMIT}
                     Branche   : ${env.GIT_BRANCH}
-                    Détails   : ${env.BUILD_URL}
+                    Details   : ${env.BUILD_URL}
                 """,
                 recipientProviders: [[$class: 'DevelopersRecipientProvider']]
             )
         }
 
         unstable {
-            echo "⚠️ Pipeline instable — Vérifier les tests"
+            echo "Pipeline instable — Verifier les tests"
         }
     }
 
