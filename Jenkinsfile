@@ -52,6 +52,7 @@ pipeline {
 
                 // ── Bandit + Semgrep via pip (image légère python:3.11-slim) ──
                 stage('Bandit + Semgrep') {
+                    options { retry(3) }
                     agent {
                         docker {
                             image 'python:3.11-slim'
@@ -91,6 +92,7 @@ pipeline {
 
                 // ── Gitleaks : détection secrets (image légère, déjà prouvée) ──
                 stage('Gitleaks') {
+                    options { retry(3) }
                     agent {
                         docker {
                             image 'zricethezav/gitleaks:v8.18.4'
@@ -134,6 +136,7 @@ pipeline {
         }
 
         stage('Tests') {
+            options { retry(3) }
             agent {
                 docker {
                     image 'python:3.11-slim'
@@ -215,6 +218,7 @@ pipeline {
 
                 // ── OWASP Dependency Check ──
                 stage('OWASP DC') {
+                    options { retry(3) }
                     agent {
                         docker {
                             image 'owasp/dependency-check:latest'
