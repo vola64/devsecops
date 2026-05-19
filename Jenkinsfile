@@ -184,51 +184,7 @@ pipeline {
         // =========================================================================
         // STAGE 2 — BUILD : Construction de l'image Docker
         // =========================================================================
-        stage('Build Docker') {
-            steps {
-                echo "Construction de l'image Docker securisee..."
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-hub-credentials',
-                    usernameVariable: 'DOCKER_HUB_USER',
-                    passwordVariable: 'DOCKER_HUB_PASS'
-                )]) {
-                    sh '''
-                        # Login Docker Hub
-                        echo "$DOCKER_HUB_PASS" | docker login ${DOCKER_REGISTRY} \
-                            -u "$DOCKER_HUB_USER" --password-stdin
-
-                        # Calcul des noms d'images
-                        IMAGE_FULL="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
-                        IMAGE_LATEST="${DOCKER_REGISTRY}/${DOCKER_HUB_USER}/${IMAGE_NAME}:latest"
-                        CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-                        # Build multi-stage avec labels OCI
-                        DOCKER_BUILDKIT=1 docker build \
-                            --file docker/Dockerfile \
-                            --tag "$IMAGE_FULL" \
-                            --tag "$IMAGE_LATEST" \
-                            --label "org.opencontainers.image.created=${CREATED_AT}" \
-                            --label "org.opencontainers.image.revision=${GIT_COMMIT}" \
-                            --label "org.opencontainers.image.version=${IMAGE_TAG}" \
-                            --label "org.opencontainers.image.source=${GIT_URL}" \
-                            --label "org.opencontainers.image.ref.name=${GIT_BRANCH}" \
-                            --build-arg BUILDKIT_INLINE_CACHE=1 \
-                            .
-
-                        echo "Image construite : $IMAGE_FULL"
-                        docker images "${DOCKER_HUB_USER}/${IMAGE_NAME}"
-
-                        # Sauvegarder l'image pour les stages suivants
-                        docker save "$IMAGE_FULL" | gzip > image.tar.gz
-                    '''
-                }
-            }
-            post {
-                always  { sh 'docker logout ${DOCKER_REGISTRY} || true' }
-                success { echo 'Build Docker reussi' }
-                failure { error 'Build Docker echoue' }
-            }
-        }
+      
 
         // =========================================================================
         // STAGE 3 — TEST : Tests unitaires et couverture
