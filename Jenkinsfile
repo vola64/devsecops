@@ -553,44 +553,67 @@ pipeline {
     post {
 
         always {
-            echo 'Generation du rapport de securite consolide...'
-            // FIX : python3 absent sur l'agent Jenkins — remplace par shell pur
+            echo 'Generation du rapport de securite CSV...'
             sh '''
-                echo "============================================================"
-                echo "  RAPPORT DE SECURITE — Pipeline Jenkins DevSecOps"
-                echo "  Build  : #${BUILD_NUMBER}"
-                echo "  Commit : ${GIT_COMMIT}"
-                echo "  Date   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                echo "============================================================"
+                DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                CSV="${REPORTS_DIR}/security-report.csv"
 
+                # En-tete CSV
+                echo "build,commit,date,outil,metrique,valeur,statut" > "$CSV"
+
+                # Bandit
                 if [ -f "${REPORTS_DIR}/bandit-report.json" ]; then
                     TOTAL=$(grep -c "issue_severity" "${REPORTS_DIR}/bandit-report.json" || echo 0)
-                    echo "BANDIT    | Issues : $TOTAL"
+                    HIGH=$(grep -c "HIGH" "${REPORTS_DIR}/bandit-report.json" || echo 0)
+                    MED=$(grep -c "MEDIUM" "${REPORTS_DIR}/bandit-report.json" || echo 0)
+                    LOW=$(grep -c "LOW" "${REPORTS_DIR}/bandit-report.json" || echo 0)
+                    if [ "$HIGH" -gt 0 ]; then STATUT_B="ECHEC"; else STATUT_B="OK"; fi
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Bandit,total_issues,${TOTAL},${STATUT_B}" >> "$CSV"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Bandit,high_issues,${HIGH},${STATUT_B}"   >> "$CSV"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Bandit,medium_issues,${MED},${STATUT_B}"  >> "$CSV"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Bandit,low_issues,${LOW},${STATUT_B}"     >> "$CSV"
                 else
-                    echo "BANDIT    | rapport non disponible"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Bandit,rapport,non_disponible,INCONNU"    >> "$CSV"
                 fi
 
+                # Gitleaks
                 if [ -f "${REPORTS_DIR}/gitleaks-report.json" ]; then
                     LEAKS=$(grep -c "RuleID" "${REPORTS_DIR}/gitleaks-report.json" || echo 0)
-                    echo "GITLEAKS  | Secrets : $LEAKS"
+                    if [ "$LEAKS" -gt 0 ]; then STATUT_G="ECHEC"; else STATUT_G="OK"; fi
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Gitleaks,secrets_detectes,${LEAKS},${STATUT_G}" >> "$CSV"
                 else
-                    echo "GITLEAKS  | rapport non disponible"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Gitleaks,rapport,non_disponible,INCONNU"   >> "$CSV"
                 fi
 
+                # Semgrep
+                if [ -f "${REPORTS_DIR}/semgrep-report.json" ]; then
+                    FINDINGS=$(grep -c "check_id" "${REPORTS_DIR}/semgrep-report.json" || echo 0)
+                    if [ "$FINDINGS" -gt 0 ]; then STATUT_S="AVERTISSEMENT"; else STATUT_S="OK"; fi
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Semgrep,findings,${FINDINGS},${STATUT_S}"  >> "$CSV"
+                else
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Semgrep,rapport,non_disponible,INCONNU"    >> "$CSV"
+                fi
+
+                # Trivy
                 if [ -f "${REPORTS_DIR}/trivy-vuln-report.json" ]; then
                     CRITS=$(grep -c "CRITICAL" "${REPORTS_DIR}/trivy-vuln-report.json" || echo 0)
-                    HIGHS=$(grep -c '"HIGH"' "${REPORTS_DIR}/trivy-vuln-report.json" || echo 0)
-                    echo "TRIVY     | CRITICAL: $CRITS | HIGH: $HIGHS"
+                    HIGHS=$(grep -c "HIGH" "${REPORTS_DIR}/trivy-vuln-report.json" || echo 0)
+                    if [ "$CRITS" -gt 0 ]; then STATUT_T="ECHEC"; else STATUT_T="OK"; fi
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Trivy,critical,${CRITS},${STATUT_T}"       >> "$CSV"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Trivy,high,${HIGHS},${STATUT_T}"           >> "$CSV"
                 else
-                    echo "TRIVY     | rapport non disponible"
+                    echo "${BUILD_NUMBER},${GIT_COMMIT},${DATE},Trivy,rapport,non_disponible,INCONNU"      >> "$CSV"
                 fi
 
-                echo "============================================================"
+                echo ""
+                echo "======================================================="
+                echo "  RAPPORT CSV : ${CSV}"
+                echo "======================================================="
+                cat "$CSV"
+                echo "======================================================="
             '''
 
-            archiveArtifacts artifacts: 'reports/**/*',
-                             allowEmptyArchive: true
-
+            archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
             sh 'docker rmi $(docker images -q) --force 2>/dev/null || true'
             sh 'rm -f image.tar.gz'
             cleanWs()
@@ -602,18 +625,6 @@ pipeline {
 
         failure {
             echo "Pipeline DevSecOps echoue — Build #${env.BUILD_NUMBER}"
-            // FIX : nécessite le plugin Email Extension
-            emailext(
-                subject: "Pipeline DevSecOps FAILED — Build #${env.BUILD_NUMBER}",
-                body: """
-                    Le pipeline CI/CD a echoue.
-                    Build     : #${env.BUILD_NUMBER}
-                    Commit    : ${env.GIT_COMMIT}
-                    Branche   : ${env.GIT_BRANCH}
-                    Details   : ${env.BUILD_URL}
-                """,
-                to: "${env.NOTIFY_EMAIL ?: 'volasoahanitra@example.com'}"
-            )
         }
 
         unstable {
