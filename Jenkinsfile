@@ -88,6 +88,9 @@ pipeline {
                     steps {
                         echo 'Analyse SAST Python avec Bandit...'
                         sh '''
+                            # FIX : HOME=/tmp evite "Permission denied: /.local"
+                            # Jenkins tourne en user 1000:1000 non-root dans le conteneur
+                            export HOME=/tmp
                             pip install bandit --quiet
                             bandit -r src/ \
                                 -f json \
@@ -548,45 +551,38 @@ pipeline {
 
         always {
             echo 'Generation du rapport de securite consolide...'
+            // FIX : python3 absent sur l'agent Jenkins — remplace par shell pur
             sh '''
-                python3 << 'PYEOF'
-import json, os
-from datetime import datetime
+                echo "============================================================"
+                echo "  RAPPORT DE SECURITE — Pipeline Jenkins DevSecOps"
+                echo "  Build  : #${BUILD_NUMBER}"
+                echo "  Commit : ${GIT_COMMIT}"
+                echo "  Date   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "============================================================"
 
-print("=" * 60)
-print("  RAPPORT DE SECURITE — Pipeline Jenkins DevSecOps")
-print(f"  Build     : #{os.getenv('BUILD_NUMBER', 'N/A')}")
-print(f"  Commit    : {os.getenv('GIT_COMMIT', 'N/A')[:12]}")
-print(f"  Date      : {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}")
-print("=" * 60)
+                if [ -f "${REPORTS_DIR}/bandit-report.json" ]; then
+                    TOTAL=$(grep -c "issue_severity" "${REPORTS_DIR}/bandit-report.json" || echo 0)
+                    echo "BANDIT    | Issues : $TOTAL"
+                else
+                    echo "BANDIT    | rapport non disponible"
+                fi
 
-reports_dir = os.getenv('REPORTS_DIR', 'reports')
+                if [ -f "${REPORTS_DIR}/gitleaks-report.json" ]; then
+                    LEAKS=$(grep -c "RuleID" "${REPORTS_DIR}/gitleaks-report.json" || echo 0)
+                    echo "GITLEAKS  | Secrets : $LEAKS"
+                else
+                    echo "GITLEAKS  | rapport non disponible"
+                fi
 
-# Bandit
-try:
-    with open(f"{reports_dir}/bandit-report.json") as f:
-        b = json.load(f)
-    issues = b.get("results", [])
-    highs  = [i for i in issues if i.get("issue_severity") in ("HIGH", "MEDIUM")]
-    print(f"\\nBANDIT    | Total: {len(issues)} | MEDIUM+: {len(highs)}")
-except Exception:
-    print("\\nBANDIT    | rapport non disponible")
+                if [ -f "${REPORTS_DIR}/trivy-vuln-report.json" ]; then
+                    CRITS=$(grep -c "CRITICAL" "${REPORTS_DIR}/trivy-vuln-report.json" || echo 0)
+                    HIGHS=$(grep -c '"HIGH"' "${REPORTS_DIR}/trivy-vuln-report.json" || echo 0)
+                    echo "TRIVY     | CRITICAL: $CRITS | HIGH: $HIGHS"
+                else
+                    echo "TRIVY     | rapport non disponible"
+                fi
 
-# Trivy
-try:
-    with open(f"{reports_dir}/trivy-vuln-report.json") as f:
-        t = json.load(f)
-    vulns = []
-    for result in t.get("Results", []):
-        vulns.extend(result.get("Vulnerabilities", []) or [])
-    crits = [v for v in vulns if v.get("Severity") == "CRITICAL"]
-    highs = [v for v in vulns if v.get("Severity") == "HIGH"]
-    print(f"TRIVY     | CRITICAL: {len(crits)} | HIGH: {len(highs)}")
-except Exception:
-    print("TRIVY     | rapport non disponible")
-
-print("\\n" + "=" * 60)
-PYEOF
+                echo "============================================================"
             '''
 
             archiveArtifacts artifacts: 'reports/**/*',
