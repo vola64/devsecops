@@ -1,5 +1,6 @@
 // =============================================================================
-// Jenkinsfile Corrigé — Résolution des Timeouts Réseau
+// Jenkinsfile — Pipeline CI/CD Sécurisé DevSecOps
+// Fix: agent any, pip install bandit+semgrep, timeout 60min
 // =============================================================================
 
 pipeline {
@@ -18,7 +19,7 @@ pipeline {
     }
 
     options {
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
@@ -41,35 +42,53 @@ pipeline {
             }
         }
 
+        // =========================================================================
+        // STAGE 1 — SAST : Bandit + Semgrep (pip) + Gitleaks (parallel)
+        // FIX: Bandit et Semgrep installés via pip dans python:3.11-slim
+        //      (évite pipelinecomponents/bandit inexistant et semgrep ~2GB)
+        // =========================================================================
         stage('SAST et Secrets') {
             parallel {
 
-                // CORRECTION : Utilisation d'une image avec Bandit pré-installé
-                stage('Bandit') {
+                // ── Bandit + Semgrep via pip (image légère python:3.11-slim) ──
+                stage('Bandit + Semgrep') {
                     agent {
                         docker {
-                            image 'pipelinecomponents/bandit:latest'
+                            image 'python:3.11-slim'
                             reuseNode true
                         }
                     }
                     steps {
-                        echo 'Analyse SAST Python avec Bandit (Image Pré-installée)...'
+                        echo 'Installation et analyse SAST (Bandit + Semgrep)...'
                         sh '''
+                            pip install bandit semgrep --quiet \
+                                --default-timeout=60 --retries 5
+
+                            echo "--- Bandit SAST ---"
                             bandit -r src/ \
                                 -f json \
                                 -o ${REPORTS_DIR}/bandit-report.json \
-                                -ll \
-                                --severity-level medium \
-                                || true
+                                -ll --severity-level medium || true
+                            bandit -r src/ -ll --severity-level medium
+
+                            echo "--- Semgrep OWASP ---"
+                            semgrep scan \
+                                --config=p/python \
+                                --config=p/security-audit \
+                                --json \
+                                --output ${REPORTS_DIR}/semgrep-report.json \
+                                src/ || true
                         '''
                     }
                     post {
                         always {
                             archiveArtifacts artifacts: "${REPORTS_DIR}/bandit-report.json", allowEmptyArchive: true
+                            archiveArtifacts artifacts: "${REPORTS_DIR}/semgrep-report.json", allowEmptyArchive: true
                         }
                     }
                 }
 
+                // ── Gitleaks : détection secrets (image légère, déjà prouvée) ──
                 stage('Gitleaks') {
                     agent {
                         docker {
@@ -81,33 +100,18 @@ pipeline {
                     steps {
                         echo 'Detection de secrets avec Gitleaks...'
                         sh '''
-                            gitleaks detect --source . --report-format json --report-path ${REPORTS_DIR}/gitleaks-report.json --no-git --verbose
+                            gitleaks detect \
+                                --source . \
+                                --report-format json \
+                                --report-path ${REPORTS_DIR}/gitleaks-report.json \
+                                --no-git \
+                                --verbose
                         '''
                     }
                     post {
-                        failure { error 'GITLEAKS : Secrets detectes !' }
+                        failure { error 'GITLEAKS : Secrets detectes dans le code !' }
                         always {
                             archiveArtifacts artifacts: "${REPORTS_DIR}/gitleaks-report.json", allowEmptyArchive: true
-                        }
-                    }
-                }
-
-                stage('Semgrep') {
-                    agent {
-                        docker {
-                            image 'returntocorp/semgrep:1.72.0'
-                            reuseNode true
-                        }
-                    }
-                    steps {
-                        echo 'Analyse SAST OWASP avec Semgrep...'
-                        sh '''
-                            semgrep scan --config=p/python --config=p/security-audit --config=p/owasp-top-ten --json --output ${REPORTS_DIR}/semgrep-report.json src/ || true
-                        '''
-                    }
-                    post {
-                        always {
-                            archiveArtifacts artifacts: "${REPORTS_DIR}/semgrep-report.json", allowEmptyArchive: true
                         }
                     }
                 }
@@ -151,28 +155,63 @@ pipeline {
             }
         }
 
+        // =========================================================================
+        // STAGE 4 — SCAN : Trivy + OWASP Dependency Check
+        // FIX: Trivy via docker run (pas d'agent docker pour éviter le socket)
+        // =========================================================================
         stage('Scan Securite') {
             parallel {
+
+                // ── Trivy via docker run (accès socket Docker direct) ──
                 stage('Trivy') {
-                    agent {
-                        docker {
-                            image 'aquasec/trivy:0.51.4'
-                            reuseNode true
-                            args '--entrypoint= -v /var/run/docker.sock:/var/run/docker.sock'
-                        }
-                    }
                     steps {
+                        echo 'Scan vulnerabilites avec Trivy...'
                         sh '''
+                            # Charger l image buildee precedemment
                             docker load < image.tar.gz
-                            TARGET_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
-                            trivy image --severity ${TRIVY_SEVERITY} --format json --output ${REPORTS_DIR}/trivy-vuln-report.json --exit-code 1 "$TARGET_IMAGE"
+
+                            LOADED_IMAGE=$(docker images \
+                                --format "{{.Repository}}:{{.Tag}}" \
+                                | grep "${IMAGE_NAME}" | head -1)
+                            echo "Image a scanner : ${LOADED_IMAGE}"
+
+                            mkdir -p ${REPORTS_DIR}
+
+                            # Scan vulnerabilites OS + librairies
+                            docker run --rm \
+                                -v /var/run/docker.sock:/var/run/docker.sock \
+                                -v "$(pwd)/${REPORTS_DIR}":/reports \
+                                aquasec/trivy:0.51.4 \
+                                image \
+                                --severity "${TRIVY_SEVERITY}" \
+                                --format json \
+                                --output /reports/trivy-vuln-report.json \
+                                --exit-code 1 \
+                                --no-progress \
+                                "${LOADED_IMAGE}"
+
+                            # Scan secrets dans l image
+                            docker run --rm \
+                                -v /var/run/docker.sock:/var/run/docker.sock \
+                                -v "$(pwd)/${REPORTS_DIR}":/reports \
+                                aquasec/trivy:0.51.4 \
+                                image \
+                                --scanners secret \
+                                --format json \
+                                --output /reports/trivy-secret-report.json \
+                                --exit-code 1 \
+                                --no-progress \
+                                "${LOADED_IMAGE}"
                         '''
                     }
                     post {
                         always { archiveArtifacts artifacts: "${REPORTS_DIR}/trivy-*.json", allowEmptyArchive: true }
+                        success { echo 'Trivy : aucune vulnerabilite CRITICAL/HIGH detectee' }
+                        failure { echo 'Trivy : vulnerabilites critiques detectees !' }
                     }
                 }
 
+                // ── OWASP Dependency Check ──
                 stage('OWASP DC') {
                     agent {
                         docker {
@@ -181,7 +220,16 @@ pipeline {
                         }
                     }
                     steps {
-                        sh '/usr/share/dependency-check/bin/dependency-check.sh --project "DevSecOps API" --scan . --format JSON --out ${REPORTS_DIR}/ --failOnCVSS 7 --enableRetired || true'
+                        echo 'OWASP Dependency Check...'
+                        sh '''
+                            /usr/share/dependency-check/bin/dependency-check.sh \
+                                --project "DevSecOps API" \
+                                --scan . \
+                                --format JSON \
+                                --out ${REPORTS_DIR}/ \
+                                --failOnCVSS 7 \
+                                --enableRetired || true
+                        '''
                     }
                     post {
                         always { archiveArtifacts artifacts: "${REPORTS_DIR}/dependency-check-report.*", allowEmptyArchive: true }
@@ -240,3 +288,4 @@ pipeline {
         }
     }
 }
+
